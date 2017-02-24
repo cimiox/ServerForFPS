@@ -1,32 +1,72 @@
 ﻿using System;
-using System.Collections;
-using System.Collections.Generic;
-using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using UnityEngine;
-using UnityEngine.UI;
 
 public class ServerConnection : MonoBehaviour
 {
+    public static ServerConnection Instance;
+
+    public GameObject EnemyPrefab;
+    public GameObject EnemyGameObject;
+    public static bool SynchronizedPosition = false;
+    public static bool instantiatePlayer = false;
+    public GameObject MyPlayer;
+
+    static string Nickname;
+    private const string host = "127.0.0.1";
+    private const int port = 11000;
     static TcpClient client;
+    static NetworkStream stream;
 
-    public GameObject PlayerPrefab;
-    GameObject PlayerGameObject;
+    public bool IsConnect { get; set; }
 
-    static bool instantiatePlayer = false;
-
-    public ServerConnection(string connectIP, int Port)
+    private void Start()
     {
+        IsConnect = false;
+
+        if (Instance == null)
+        {
+            Instance = this;
+        }
+        else
+        {
+            Destroy(this);
+        }
+        DontDestroyOnLoad(this);
+
+        Nickname = UnityEngine.Random.RandomRange(1, 100).ToString();
         client = new TcpClient();
-        client.Connect(IPAddress.Parse(connectIP), Port);
+
+        try
+        {
+            client.Connect(host, port);
+            if (client.Connected)
+            {
+                IsConnect = true;
+            }
+            stream = client.GetStream();
+
+            string message = Nickname;
+            byte[] data = Encoding.UTF8.GetBytes(message);
+            stream.Write(data, 0, data.Length);
+
+            Thread receivedThread = new Thread(new ThreadStart(ReceiveMessage));
+            receivedThread.Start();
+            print("enter " + Nickname);
+        }
+        catch (Exception ex)
+        {
+            print(ex.Message);
+            //Disconnect();
+        }
     }
 
-    public void Work()
+    ~ServerConnection()
     {
-        Thread clientListener = new Thread(Reader);
-        clientListener.Start();
+        Disconnect();
     }
 
     void Update()
@@ -36,117 +76,171 @@ public class ServerConnection : MonoBehaviour
             InstantiatePlayer();
             instantiatePlayer = false;
         }
+
+        if (SynchronizedPosition)
+        {
+            SendMessage(MyPlayer.transform.position.x, MyPlayer.transform.position.y, MyPlayer.transform.position.z);
+            SendMessage(MyPlayer.transform.rotation.x, MyPlayer.transform.rotation.y, MyPlayer.transform.rotation.z, MyPlayer.transform.rotation.w);
+        }
+
+        if (EnemyGameObject != null)
+        {
+            EnemyGameObject.transform.position = new Vector3(PosX, PosY, PosZ);
+            EnemyGameObject.transform.eulerAngles = new Vector3(RotX, RotY, RotZ);
+        }
     }
 
     public new void SendMessage(string message)
     {
-        message.Trim();
-        byte[] Buffer = Encoding.UTF8.GetBytes(message);
-        client.GetStream().Write(Buffer, 0, Buffer.Length);
-        print(message);
+        EncodingAndWrite(message);
     }
 
     public new void SendMessage(float posX, float posY, float posZ)
     {
-        string message = "<PosX>" + posX.ToString() + "/<PosY>" + posY.ToString() + "/<PosZ>" + posZ.ToString();
+        string message = "<Position>" + "/<PosX>" + posX.ToString() + "/<PosY>" + posY.ToString() + "/<PosZ>" + posZ.ToString();
         message.Trim();
-        byte[] Buffer = Encoding.UTF8.GetBytes(message);
-        client.GetStream().Write(Buffer, 0, Buffer.Length);
-        print(message);
+
+        EncodingAndWrite(message);
     }
 
-    void Reader()
+    public new void SendMessage(float rotX, float rotY, float rotZ, float rotW)
+    {
+        string message = "<Rotation>" + "/<RotX>" + rotX.ToString() + "/<RotY>" + rotY.ToString() + "/<RotZ>" + rotZ.ToString() + "/<RotW>" + rotW.ToString();
+        message.Trim();
+
+        EncodingAndWrite(message);
+    }
+
+    private void EncodingAndWrite(string message)
+    {
+        byte[] data = Encoding.UTF8.GetBytes(message);
+        stream.Write(data, 0, data.Length);
+    }
+
+    private void ReceiveMessage()
     {
         while (true)
         {
-            NetworkStream networkStream = client.GetStream();
-            List<byte> Buffer = new List<byte>();
-
-            string[] message = null;
-
-            while (networkStream.DataAvailable)
+            try
             {
-                int readByte = networkStream.ReadByte();
-                if (readByte > -1)
+                byte[] data = new byte[1024];
+
+                StringBuilder builder = new StringBuilder();
+                int bytes = 0;
+
+                do
                 {
-                    Buffer.Add((byte)readByte);
+                    bytes = stream.Read(data, 0, data.Length);
+                    builder.Append(Encoding.UTF8.GetString(data, 0, bytes));
+                } while (stream.DataAvailable);
+
+                string message = builder.ToString();
+
+                if (message.Contains("<InstantiatePlayer>"))
+                {
+                    instantiatePlayer = true;
+                }
+                else if (CheckMessage(message, "<Position>"))
+                {
+                    ParseMessage(message, "<Position>");
                 }
 
-                if (Buffer.Count > 0)
+                if (CheckMessage(message, "<Rotation>"))
                 {
-                    Manager.msg.Add(Encoding.UTF8.GetString(Buffer.ToArray()));
+                    ParseMessage(message, "<Rotation>");
+                }
 
-                    message = Encoding.UTF8.GetString(Buffer.ToArray()).Split('/');
+                if (CheckMessage(message, "<EnemyHealth>"))
+                {
+                    ParseMessage(message, "<EnemyHealth>");
                 }
             }
-
-            if (message != null)
+            catch (Exception ex)
             {
-                foreach (var item in message)
-                {
-                    if (item.Contains("<PosX>"))
-                    {
-                        Player.Instance.PosX = Convert.ToSingle(item.Remove(0, 6));
-                    }
-                    else if (item.Contains("<PosY>"))
-                    {
-                        Player.Instance.PosY = Convert.ToSingle(item.Remove(0, 6));
-                    }
-                    else if (item.IndexOf("<PosZ>") > -1)
-                    {
-                        Player.Instance.PosZ = Convert.ToSingle(item.Remove(0, 6));
-                    }
-
-                    if (item == "<InstantiatePlayer>")
-                    {
-                        instantiatePlayer = true;
-                    }
-                }
+                print(ex);
+                Disconnect();
             }
         }
     }
 
-    public void InstantiatePlayer()
+    private bool CheckMessage(string message, string value)
     {
-        PlayerGameObject = Instantiate(PlayerPrefab);
-        PlayerGameObject.gameObject.transform.position = new Vector3(Player.Instance.PosX, Player.Instance.PosY, Player.Instance.PosZ);
+        return message.Contains(value);
     }
 
-    ~ServerConnection()
+    private void ParseMessage(string message, string typeMsg)
     {
+        if (message != null)
+        {
+            switch (typeMsg)
+            {
+                case "<Position>":
+                    PosX = FindValuesInMessage("PosX", message);
+                    PosY = FindValuesInMessage("PosY", message);
+                    PosZ = FindValuesInMessage("PosZ", message);
+                    break;
+                case "<Rotation>":
+                    RotX = FindValuesInMessage("RotX", message);
+                    RotX = FindValuesInMessage("RotY", message);
+                    RotX = FindValuesInMessage("RotZ", message);
+                    RotX = FindValuesInMessage("RotW", message);
+                    break;
+                case "<EnemyHealth>":
+                    foreach (Match item in new Regex(Pattern("EnemyHealth")).Matches(message))
+                    {
+                        MyPlayer.GetComponent<PlayerHealth>().currentHealth = Convert.ToInt32(item.Value.Remove(0, 13));
+                    }
+                    break;
+            }
+        }
+    }
+
+    private float FindValuesInMessage(string pattern, string message)
+    {
+        foreach (Match item in new Regex(Pattern(pattern)).Matches(message))
+        {
+            return Convert.ToSingle(item.Value.Remove(0, 6));
+        }
+
+        return 0;
+    }
+
+    private string Pattern(string value)
+    {
+        return string.Format(@"<{0}>.?\d+.?\d+", value);
+    }
+
+    public void InstantiatePlayer()
+    {
+        EnemyGameObject = Instantiate(EnemyPrefab);
+        EnemyGameObject.gameObject.transform.position = new Vector3(PosX, PosY, PosZ);
+        EnemyGameObject.gameObject.transform.rotation = new Quaternion(RotX, RotY, RotZ, RotW);
+        EnemyGameObject.name = Name;
+        SynchronizedPosition = true;
+    }
+
+    void Disconnect()
+    {
+        if (stream != null)
+        {
+            stream.Close();
+        }
         if (client != null)
         {
             client.Close();
         }
     }
 
-    public class Player
-    {
-        public float PosX { get; set; }
-        public float PosY { get; set; }
-        public float PosZ { get; set; }
+    public static float PosX { get; set; }
+    public static float PosY { get; set; }
+    public static float PosZ { get; set; }
 
-        public string Name { get; set; }
-        public bool Team { get; set; }
+    public static float RotX { get; set; }
+    public static float RotY { get; set; }
+    public static float RotZ { get; set; }
+    public static float RotW { get; set; }
 
-        private static Player instance;
-        public static Player Instance
-        {
-            get
-            {
-                if (instance == null)
-                {
-                    instance = new Player();
-                }
-                return instance;
-            }
-        }
-
-
-        private Player()
-        {
-        }
-    }
+    public static string Name { get; set; }
 }
 
 

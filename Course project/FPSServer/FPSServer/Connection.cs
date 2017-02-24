@@ -1,121 +1,77 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
 
 namespace FPSServer
 {
     class Connection
     {
-        static Connection Instance;
+        static TcpListener tcpListener; // сервер для прослушивания
+        List<ClientInfo> clients = new List<ClientInfo>(); // все подключения
 
-        public TcpListener Listener;
-        public List<ClientInfo> clients = new List<ClientInfo>();
-        public List<ClientInfo> NewClients = new List<ClientInfo>();
-        public TextWriter Out;
-
-        public Connection(int Port, TextWriter _out)
+        protected internal void AddConnection(ClientInfo clientObject)
         {
-            Out = _out;
-            Instance = this;
-            Listener = new TcpListener(IPAddress.Loopback, Port);
-            Listener.Start();
+            clients.Add(clientObject);
         }
-
-        ~Connection()
+        protected internal void RemoveConnection(string id)
         {
-            if (Listener != null)
+            // получаем по id закрытое подключение
+            ClientInfo client = clients.FirstOrDefault(c => c.Id == id);
+            // и удаляем его из списка подключений
+            if (client != null)
+                clients.Remove(client);
+        }
+        // прослушивание входящих подключений
+        protected internal void Listen()
+        {
+            try
             {
-                Listener.Stop();
+                tcpListener = new TcpListener(IPAddress.Loopback, 11000);
+                tcpListener.Start();
+                Console.WriteLine("Сервер запущен. Ожидание подключений...");
+
+                while (true)
+                {
+                    TcpClient tcpClient = tcpListener.AcceptTcpClient();
+
+                    ClientInfo clientObject = new ClientInfo(tcpClient, this);
+                    Thread clientThread = new Thread(new ThreadStart(clientObject.Process));
+                    clientThread.Start();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+                Disconnect();
             }
         }
 
-        public void Work()
+        // трансляция сообщения подключенным клиентам
+        protected internal void BroadcastMessage(string message, string id)
         {
-            Thread clientListener = new Thread(ListenerClients);
-            clientListener.Start();
-
-            while (true)
+            byte[] data = Encoding.UTF8.GetBytes(message);
+            for (int i = 0; i < clients.Count; i++)
             {
-                foreach (ClientInfo item in clients)
+                if (clients[i].Id != id) // если id клиента не равно id отправляющего
                 {
-                    if (item.IsConnect)
-                    {
-                        NetworkStream stream = item.Client.GetStream();
-                        while (stream.DataAvailable)
-                        {
-
-                            int readByte = stream.ReadByte();
-                            if (readByte != -1)
-                            {
-                                item.buffer.Add((byte)readByte);
-                            }
-                        }
-
-                        if (item.buffer.Count > 0)
-                        {
-                            foreach (ClientInfo otherClients in clients)
-                            {
-                                byte[] msg = item.buffer.ToArray();
-                                Console.WriteLine(Encoding.UTF8.GetString(msg));
-                                
-                                item.buffer.Clear();
-
-                                foreach (ClientInfo otherOtherClients in clients)
-                                {
-                                    if (otherOtherClients != item)
-                                    {
-                                        try
-                                        {
-                                            otherOtherClients.Client.GetStream().Write(msg, 0, msg.Length);
-
-                                            byte[] byt = new byte[1024];
-                                            otherOtherClients.Client.GetStream().Read(byt, 0, byt.Length);
-                                            //Console.WriteLine(Encoding.UTF8.GetString(byt));
-                                        }
-                                        catch (Exception)
-                                        {
-                                            otherOtherClients.IsConnect = false;
-                                            otherOtherClients.Client.Close();
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                clients.RemoveAll(delegate (ClientInfo clientInfo)
-                {
-                    if (!clientInfo.IsConnect)
-                    {
-                        Instance.Out.WriteLine("Client disconnect");
-                        return true;
-                    }
-
-                    return false;
-                });
-
-                if (NewClients.Count > 0)
-                {
-                    clients.AddRange(NewClients);
-                    NewClients.Clear();
+                    clients[i].Stream.Write(data, 0, data.Length); //передача данных
                 }
             }
         }
-
-        static void ListenerClients()
+        // отключение всех клиентов
+        protected internal void Disconnect()
         {
-            while (true)
+            tcpListener.Stop(); //остановка сервера
+
+            for (int i = 0; i < clients.Count; i++)
             {
-                Instance.NewClients.Add(new ClientInfo(Instance.Listener.AcceptTcpClient()));
-                Instance.Out.WriteLine("New Client");
+                clients[i].Close(); //отключение клиента
             }
+            Environment.Exit(0); //завершение процесса
         }
     }
 }
